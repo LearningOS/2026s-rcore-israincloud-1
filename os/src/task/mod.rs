@@ -15,12 +15,13 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskStatus, MAX_SYSCALL_NUM};
 
 pub use context::TaskContext;
 
@@ -126,6 +127,26 @@ impl TaskManager {
         inner.tasks[inner.current_task].get_trap_cx()
     }
 
+    /// Record one syscall for the current task.
+    fn record_current_syscall(&self, syscall_id: usize) {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return;
+        }
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_id] += 1;
+    }
+
+    /// Get the number of times the current task has invoked a syscall.
+    fn current_syscall_count(&self, syscall_id: usize) -> isize {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return 0;
+        }
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_id] as isize
+    }
+
     /// Change the current 'Running' task's program break
     pub fn change_current_program_brk(&self, size: i32) -> Option<usize> {
         let mut inner = self.inner.exclusive_access();
@@ -152,6 +173,41 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+    /// Allocate mapped memory for the currently running task.
+    pub fn mmap_current(
+        &self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memory_set = &mut inner.tasks[current].memory_set;
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in start_vpn.0..end_vpn.0 {
+            if memory_set.is_mapped(vpn.into()) {
+                return -1;
+            }
+        }
+        memory_set.insert_framed_area(start_va, end_va, permission);
+        0
+    }
+    /// Unmap memory for the currently running task.
+    pub fn munmap_current(&self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memory_set = &mut inner.tasks[current].memory_set;
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in start_vpn.0..end_vpn.0 {
+            if !memory_set.is_mapped(vpn.into()) {
+                return -1;
+            }
+        }
+        memory_set.unmap_area(start_va, end_va);
+        0
     }
 }
 
@@ -198,7 +254,27 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
     TASK_MANAGER.get_current_trap_cx()
 }
 
+/// Record one syscall for the current task.
+pub fn record_current_syscall(syscall_id: usize) {
+    TASK_MANAGER.record_current_syscall(syscall_id);
+}
+
+/// Get the number of times the current task has invoked a syscall.
+pub fn current_syscall_count(syscall_id: usize) -> isize {
+    TASK_MANAGER.current_syscall_count(syscall_id)
+}
+
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Helper function to request mmap for the current task.
+pub fn current_task_mmap(start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) -> isize {
+    TASK_MANAGER.mmap_current(start_va, end_va, permission)
+}
+
+/// Helper function to request munmap for the current task.
+pub fn current_task_munmap(start_va: VirtAddr, end_va: VirtAddr) -> isize {
+    TASK_MANAGER.munmap_current(start_va, end_va)
 }

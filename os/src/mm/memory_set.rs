@@ -51,6 +51,12 @@ impl MemorySet {
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
+
+    /// Check whether a virtual page is currently mapped by a valid PTE.
+    pub fn is_mapped(&self, vpn: VirtPageNum) -> bool {
+        self.translate(vpn).map_or(false, |pte| pte.is_valid())
+    }
+
     /// Assume that no conflicts.
     pub fn insert_framed_area(
         &mut self,
@@ -69,6 +75,57 @@ impl MemorySet {
             map_area.copy_data(&mut self.page_table, data);
         }
         self.areas.push(map_area);
+    }
+    /// Unmap a specific mapped area in the user's memory space.
+    pub fn unmap_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        let mut new_areas = Vec::with_capacity(self.areas.len() + 1);
+        for mut area in self.areas.drain(..) {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            let overlap_start = VirtPageNum::from(area_start.0.max(start_vpn.0));
+            let overlap_end = VirtPageNum::from(area_end.0.min(end_vpn.0));
+            if overlap_start >= overlap_end {
+                new_areas.push(area);
+                continue;
+            }
+
+            for vpn in VPNRange::new(overlap_start, overlap_end) {
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+
+            let mut left_frames = BTreeMap::new();
+            let mut right_frames = BTreeMap::new();
+            for (vpn, frame) in area.data_frames.into_iter() {
+                if vpn < overlap_start {
+                    left_frames.insert(vpn, frame);
+                } else if vpn >= overlap_end {
+                    right_frames.insert(vpn, frame);
+                }
+            }
+
+            if area_start < overlap_start {
+                new_areas.push(MapArea {
+                    vpn_range: VPNRange::new(area_start, overlap_start),
+                    data_frames: left_frames,
+                    map_type: area.map_type,
+                    map_perm: area.map_perm,
+                });
+            }
+            if overlap_end < area_end {
+                new_areas.push(MapArea {
+                    vpn_range: VPNRange::new(overlap_end, area_end),
+                    data_frames: right_frames,
+                    map_type: area.map_type,
+                    map_perm: area.map_perm,
+                });
+            }
+        }
+        self.areas = new_areas;
+        unsafe {
+            core::arch::asm!("sfence.vma");
+        }
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
