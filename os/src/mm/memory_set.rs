@@ -60,6 +60,55 @@ impl MemorySet {
             None,
         );
     }
+    /// mmap: insert a Framed area in [start_va, end_va), failing if any
+    /// page in that range is already mapped. Returns 0 on success, -1 on conflict.
+    pub fn mmap(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> isize {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        // Reject if any page in the range is already mapped (valid PTE).
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if let Some(pte) = self.page_table.translate(vpn) {
+                if pte.is_valid() {
+                    return -1;
+                }
+            }
+        }
+        self.insert_framed_area(start_va, end_va, permission);
+        0
+    }
+
+    /// munmap: tear down mappings in [start_va, end_va). Every page in the
+    /// range must currently be mapped, otherwise returns -1.
+    pub fn munmap(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        // First pass: every page must be mapped.
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            match self.page_table.translate(vpn) {
+                Some(pte) if pte.is_valid() => {}
+                _ => return -1,
+            }
+        }
+        // Second pass: unmap each page. For each vpn, find the MapArea that
+        // owns it and drop the corresponding frame so the physical page is
+        // released; then clear the PTE.
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            for area in self.areas.iter_mut() {
+                if area.vpn_range.get_start() <= vpn && vpn < area.vpn_range.get_end() {
+                    area.release_frame(vpn);
+                    break;
+                }
+            }
+            self.page_table.unmap(vpn);
+        }
+        0
+    }
+
     /// remove a area
     pub fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
         if let Some((idx, area)) = self
@@ -353,6 +402,13 @@ impl MapArea {
             self.data_frames.remove(&vpn);
         }
         page_table.unmap(vpn);
+    }
+    /// Drop the FrameTracker for `vpn` (if Framed) without touching the page
+    /// table. Used by MemorySet::munmap which clears the PTE separately.
+    pub fn release_frame(&mut self, vpn: VirtPageNum) {
+        if self.map_type == MapType::Framed {
+            self.data_frames.remove(&vpn);
+        }
     }
     pub fn map(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
