@@ -318,6 +318,49 @@ impl MemorySet {
             false
         }
     }
+
+    /// Try to mmap the range `[start_va, end_va)` with the given permission.
+    /// Returns false if any page in the range is already mapped.
+    pub fn mmap(&mut self, start_va: VirtAddr, end_va: VirtAddr, perm: MapPermission) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        // Refuse if any page in the range is already mapped.
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if let Some(pte) = self.page_table.translate(vpn) {
+                if pte.is_valid() {
+                    return false;
+                }
+            }
+        }
+        self.insert_framed_area(start_va, end_va, perm);
+        true
+    }
+
+    /// Try to munmap the range `[start_va, end_va)`.
+    /// Returns false if any page in the range is not currently mapped.
+    pub fn munmap(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        // Verify every page in the range is mapped.
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            match self.page_table.translate(vpn) {
+                Some(pte) if pte.is_valid() => continue,
+                _ => return false,
+            }
+        }
+        // Unmap each page from its containing area.
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            for area in self.areas.iter_mut() {
+                if area.data_frames.contains_key(&vpn) {
+                    area.unmap_one(&mut self.page_table, vpn);
+                    break;
+                }
+            }
+        }
+        // Drop areas whose pages have all been removed.
+        self.areas.retain(|area| !area.data_frames.is_empty());
+        true
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {

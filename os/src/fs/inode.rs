@@ -4,7 +4,7 @@
 //!
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
-use super::File;
+use super::{File, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -101,6 +101,26 @@ impl OpenFlags {
     }
 }
 
+/// Hard-link `new_name` to whatever inode is currently called `old_name`,
+/// both inside the root directory. Returns 0 on success, -1 on failure.
+pub fn linkat(old_name: &str, new_name: &str) -> isize {
+    if ROOT_INODE.link(old_name, new_name) {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Remove the directory entry `name` from the root directory. Returns 0 on
+/// success, -1 if `name` doesn't exist.
+pub fn unlinkat(name: &str) -> isize {
+    if ROOT_INODE.unlink(name) {
+        0
+    } else {
+        -1
+    }
+}
+
 /// Open a file
 pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     let (readable, writable) = flags.read_write();
@@ -155,5 +175,21 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn fstat(&self) -> Option<(u64, StatMode, u32)> {
+        // Snapshot the underlying easy-fs inode without holding our own lock
+        // while we re-enter easy-fs (which takes its own lock).
+        let inode = {
+            let inner = self.inner.exclusive_access();
+            inner.inode.clone()
+        };
+        let inode_id = inode.get_inode_id();
+        let mode = if inode.is_dir_inode() {
+            StatMode::DIR
+        } else {
+            StatMode::FILE
+        };
+        let nlink = ROOT_INODE.link_count_of(inode_id);
+        Some((inode_id as u64, mode, nlink))
     }
 }
