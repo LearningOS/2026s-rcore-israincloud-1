@@ -293,6 +293,22 @@ impl MemorySet {
             false
         }
     }
+
+    /// Mmap the range '[start_va, end_va]' with the given permission.
+    /// Returns false if any page in the range is already mapped.
+    pub fn mmap(&mut self, start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if let Some(pte) = self.page_table.translate(vpn) {
+                if pte.is_valid() {
+                    return false;
+                }
+            }
+        }
+        self.insert_framed_area(start_va, end_va, permission);
+        true
+    }
 }
 
 pub struct MapArea {

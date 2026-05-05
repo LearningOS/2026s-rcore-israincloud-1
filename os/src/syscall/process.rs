@@ -1,10 +1,7 @@
 use crate::{
-    fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
-    task::{
-        current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
-        suspend_current_and_run_next, SignalFlags,
-    },
+    config::PAGE_SIZE, fs::{OpenFlags, open_file}, mm::{MapPermission, VirtAddr, translated_byte_buffer, translated_ref, translated_refmut, translated_str}, task::{
+        SignalFlags, current_process, current_task, current_user_token, exit_current_and_run_next, pid2process, suspend_current_and_run_next
+    }, timer::get_time_us
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -151,23 +148,66 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_get_time",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    let token = current_user_token();
+    let us = get_time_us();
+    let tv = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    let src = unsafe {
+        core::slice::from_raw_parts(
+            &tv as *const TimeVal as *const u8,
+        core::mem::size_of::<TimeVal>(),
+        )
+    };
+    let dsts = translated_byte_buffer(token, ts as *const u8, src.len());
+    let mut offset = 0;
+    for dst in dsts {
+        let n = dst.len();
+        dst.copy_from_slice(&src[offset..offset + n]);
+        offset += n;
+    }
+    0
 }
 
 /// mmap syscall
 ///
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    if start % PAGE_SIZE != 0 {
+        return -1;
+    }
+    if (port & !0x7) != 0 || (port & 0x7) == 0 {
+        return -1;
+    }
+    if len == 0 { return 0; }
+    let mut perm = MapPermission::U;
+    if port & 0x1 != 0 {
+        perm |= MapPermission::R;
+    }
+    if port & 0x2 != 0 {
+        perm |= MapPermission::W;
+    }
+    if port & 0x4 != 0 {
+        perm |= MapPermission::X;
+    }
+    let task = current_task().unwrap();
+    let process = task.process.upgrade().unwrap();
+    let mut process_inner = process.inner_exclusive_access();
+    if process_inner.memory_set.mmap(VirtAddr::from(start), VirtAddr::from(start+len), perm) {
+        0
+    } else {
+        -1
+    }
 }
 
 /// munmap syscall
